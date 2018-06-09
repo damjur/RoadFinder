@@ -1,0 +1,561 @@
+
+# coding: utf-8
+
+# In[1]:
+
+
+
+from bs4 import BeautifulSoup
+import urllib
+import cv2
+import matplotlib.pyplot as plt
+import numpy as np
+import pickle
+from tqdm import tqdm
+import os
+
+import keras
+from keras.models import Model
+from keras.layers import Dense, Dropout, Flatten, Input, concatenate
+from keras.layers import Conv2D, MaxPooling2D,UpSampling2D,Lambda, ZeroPadding2D
+from keras import backend as K
+from sklearn.model_selection import train_test_split
+from keras.regularizers import l1_l2
+
+import gc
+import re
+
+
+class MyException(Exception):
+    pass
+
+
+# In[3]:
+
+
+HOWMANY = 1100
+MAXLINKS = 1109
+DEBUG = True
+TMP_DIR = 'D:\\tmp'
+FORCE_RELOAD = False#True
+LOAD = False#True
+PREPROCESS = True#False
+batch_size = 128   # ile obrazków przetwarzamy na raz (aktualizacja wag sieci następuje raz na całą grupę obrazków)
+epochs = 12         # ile epok będziemy uczyli
+SIZE = (750,750)
+SIDE = 75
+IMPOSITION = 5
+HOWMANYPERIMAGE = int(SIZE[0]*SIZE[1]/SIDE/SIDE)
+IMAGESPERFILE = 100
+assert int(SIZE[0]*SIZE[1]/SIDE/SIDE)==HOWMANYPERIMAGE
+
+
+# In[4]:
+
+
+def loadImage(url):
+    raw = urllib.request.urlopen(url).read()
+    npraw= np.array(bytearray(raw),dtype=np.uint8)
+    return cv2.imdecode(npraw,-1)#-1 -> as is (with the alpha channel)
+
+def getImageName(url):
+    return url.split('/').pop().split('.').pop(0)
+
+def pickleBigDataset(prefix,dataset,size):
+    j = int(np.ceil(len(dataset)/size))
+    # b = getNumber(prefix)
+    # for i in range(b,j+b):
+        # np.save(os.path.join(TMP_DIR, prefix+str(i)),np.array(dataset[size*(i-1):size*i]))
+        # dataset = dataset[size*i:]
+        # gc.collect()
+    # if len(dataset)>0:
+        # np.save(os.path.join(TMP_DIR, prefix+str(j+b)),np.array(dataset))
+        # dataset = []
+        # gc.collect()
+    for i in range(1,j+1):
+        np.save(os.path.join(TMP_DIR, prefix+str(i)),np.array(dataset[size*(i-1):size*i]))
+        
+def getNumber(prefix):
+    d = np.dstack(([int(re.findall('\d+',f)[0]) for f in os.listdir(TMP_DIR) if os.path.isfile(os.path.join(TMP_DIR, f)) and f.startswith(prefix) and f.endswith('.npy')],
+    [int(os.path.getsize(os.path.join(TMP_DIR, f))) for f in os.listdir(TMP_DIR) if os.path.isfile(os.path.join(TMP_DIR, f)) and f.startswith(prefix)]))[0]
+    return d[d[:,1]==d[:,1].max()][:,0].max()+1 
+
+def unpickleBigDataset(prefix):
+    onlyfiles = [f for f in os.listdir(TMP_DIR) if os.path.isfile(os.path.join(TMP_DIR, f))
+                 and f.startswith(prefix)]
+    dataset = []
+    if len(onlyfiles)>0:
+        print("Loading...")
+        dataset = [x for x in np.load(os.path.join(TMP_DIR, onlyfiles[0]))]
+        print("Loaded first")
+        for f in tqdm(onlyfiles[1:]):
+            dataset += [x for x in np.load(os.path.join(TMP_DIR, f))]
+    return dataset
+#     return np.load(os.path.join(TMP_DIR, "{}.npy".format(prefix)))
+    
+            
+def loadImagesFromSite(url,prefix):
+    onlyfiles = [f for f in os.listdir(TMP_DIR) if os.path.isfile(os.path.join(TMP_DIR, f)) and f.startswith(prefix)]
+    if len(onlyfiles)==0 or FORCE_RELOAD:
+        imgs = []
+        I = None
+        
+    else:
+        imgs = [img for img in unpickleBigDataset(prefix)[:HOWMANY]]
+        I = len(imgs)
+    print("Cached images {}.".format(I if I is not None else 0))
+    
+    if (HOWMANY is not None and len(imgs)<HOWMANY and len(imgs)<MAXLINKS) or (len(imgs)<MAXLINKS and HOWMANY is None):
+        print("Loading images from {}".format(url))
+        print("Proceeding from {} image.".format(I if I is not None else 0))
+
+        s = IMAGESPERFILE
+
+        with urllib.request.urlopen(url) as response:
+            html = BeautifulSoup(response.read(),"lxml")
+            i = I if I is not None else 0
+            links = html.find_all('a')[I:HOWMANY]
+            for link in tqdm(links):
+                img = loadImage(link.get('href'))  
+                img = cv2.resize(img,SIZE)
+#                 print(link.get('href'))
+                imgs += [cv2.resize(img,SIZE)]
+                if i%s==0:
+                    pickleBigDataset(prefix,imgs,s)
+                i+=1
+        pickleBigDataset(prefix,imgs,s)
+    
+        
+    return np.array(imgs)  
+
+def saveDataset(X,Y,prefix=""):
+    with open('pickledDatasetX'+prefix,'wb') as f:
+        pickle.dump(X,f)
+    with open('pickledDatasetY'+prefix,'wb') as f:
+        pickle.dump(Y,f)
+        
+def loadDataset(prefix=""):
+    try:
+        X = unpickleBigDataset('x')
+        Y = unpickleBigDataset('y')
+        if len(X) == len(Y) and len(X) == HOWMANY:
+            return X,Y
+        else:
+            print("Failed loading dataset from file system")
+            return None,None
+    except:
+        print("Failed loading dataset from file system")
+        return None,None
+    
+def display(X,Y,howmany=None):
+    if howmany is None:
+        howmany = X.shape[0]
+        
+    for i in range(howmany):
+        print(X[i].max(),X[i].min())
+        plt.figure()
+        plt.subplot(1,2,1)
+        plt.imshow(X[i])
+        plt.subplot(1,2,2)
+        plt.imshow(Y[i])
+        
+
+
+# In[5]:
+
+
+# def get_patches(image,size,side,imposition):
+#     patches = []
+    
+    
+#     for i in range(int(size[0]/side)):
+#         for j in range(int(size[1]/side)):
+#             patches += [image[i*side:(i+1)*side,j*side:(j+1)*side]]
+#     return patches
+
+def get_patches(image,size,side,imposition):
+    patches = []
+    
+    if len(image.shape)==3:
+        img = np.zeros((image.shape[0]+imposition,image.shape[1]+imposition,3))
+        for i in range(3):
+            img[...,i] = np.pad(image[...,i],((imposition,0),(imposition,0)),'reflect')
+        image = img
+    else:
+        image = np.pad(image,((imposition,0),(imposition,0)),'reflect')
+
+    for i in range(int(size[0]/side)):
+        for j in range(int(size[1]/side)):
+            imp1=np.max([i*side-imposition,0])
+            imp2=(i+1)*side+imposition if imp1!=0 else (i+1)*side+imposition*2
+            imp3=np.max([j*side-imposition,0])
+            imp4=(j+1)*side+imposition if imp3!=0 else (j+1)*side+imposition*2
+            patches += [image[imp1:imp2,imp3:imp4]]
+    return patches
+
+def preprocessorX(image):
+    size,side,imposition = SIZE,SIDE,IMPOSITION
+    image = cv2.cvtColor(image, cv2.COLOR_BGR2HSV)[...,2]
+
+    image = image.astype(np.float32)
+
+    if image.max() > 1:
+        image /= 255
+
+    # for i in range(3):
+        # image[...,i] -= image[...,i].mean()
+        # image[...,i] /= image[...,i].std()
+    image -= image.mean()
+    image /= image.std()
+
+    #remove outliers
+    image[image<-3] = -3
+    image[image>3] = 3
+
+    #between -1,1
+    # for i in range(3):
+        # image[...,i] /= np.max(np.abs([image[...,i].min(),image[...,i].max()]))
+    image /= np.max(np.abs([image.min(),image.max()]))
+
+    return get_patches(image,size,side,imposition)
+    
+def preprocessorY(image):
+    size,side,imposition = SIZE,SIDE,IMPOSITION
+
+    image = image.astype(np.float32)
+    if image.max() > 1:
+        image /= 255
+    # for i in range(3):
+        # image[...,i] = (image[...,i] - image[...,i].min())/(image[...,i].max() - image[...,i].min())
+    image = (image - image.min())/(image.max() - image.min())
+    return get_patches(image,size,side,imposition)
+    
+def getRoadStats(arr,mask):
+    b = mask.astype(np.bool)
+    x = arr[b]
+    if len(x) != 0:
+        return [x.max(0),x.min(0),x.mean(0),x.std(0),np.median(x,axis=0)]
+    else:
+        return None
+
+def preprocessXY(X,Y):
+    
+    r = []
+    for i in range(len(X)):
+        s = getRoadStats(X[i],Y[i])
+        if s is not None:
+            r += [s]
+            
+    return np.array(r).mean(0)
+    
+
+def preprocess(images,preprocessor,prefix):
+    onlyfiles = [f for f in os.listdir(TMP_DIR) if os.path.isfile(os.path.join(TMP_DIR, f)) and f.startswith(prefix)]
+    if len(onlyfiles)==0:
+        I = None
+        result = []
+    else:
+        result = unpickleBigDataset(prefix)[:HOWMANY*HOWMANYPERIMAGE]
+        I = int(len(result)/HOWMANYPERIMAGE)
+    print("Cached images {}.".format(len(result)))
+    
+    s = int(IMAGESPERFILE )
+    if len(result)<HOWMANY*HOWMANYPERIMAGE and images is not None:
+        print("Preprocessing images.")
+        print("Proceeding from {} image.".format(I if I is not None else 0))
+        # i = I if I is not None else 0
+        images = images[I:]
+        i = 0
+        gc.collect()
+        # for image in tqdm(images):
+        R = len(images)
+        for j in tqdm(range(R)):
+            if len(images)==0:
+                break
+            result += preprocessor(images[i])
+            if j%s==0:
+                images = images[i+1:]
+                i = 0
+                pickleBigDataset(prefix,result,int(s*HOWMANYPERIMAGE / 2))
+            else:
+                i += 1
+            gc.collect()
+        pickleBigDataset(prefix,result,int(s*HOWMANYPERIMAGE / 2))
+        images = None
+        gc.collect()
+    images = None
+    gc.collect()
+    
+    return np.array(result)
+
+
+# In[6]:
+
+
+def doSomeDeepLearning(X=None,Y=None,side=85):
+    num_classes = 2    # ile klas będziemy rozpoznawali
+
+    # input image dimensions
+    img_rows, img_cols = side,side   # takie wymiary mają obrazki w bazie MNIST
+
+    # the data, shuffled and split between train and test sets
+    try:
+        x_train = np.array(unpickleBigDataset('xain'))
+        y_train = np.array(unpickleBigDataset('yain'))
+        x_test = np.array(unpickleBigDataset('xest'))
+        y_test = np.array(unpickleBigDataset('yest'))
+        if len(x_train)==0 or len(y_train)==0 or len(x_test)==0 or len(y_test)==0:
+            raise Exception
+        if len(x_train) + len(x_test)!=HOWMANY*HOWMANYPERIMAGE:
+            raise MyException
+    except:
+        if X is None or Y is None:
+            raise MyException
+        x_train, x_test, y_train, y_test = train_test_split(X, Y, test_size=0.3)
+        if K.image_data_format() == 'channels_first':
+            x_train = x_train.reshape(x_train.shape[0], 1, img_rows, img_cols)
+            x_test = x_test.reshape(x_test.shape[0], 1, img_rows, img_cols)
+            y_train = y_train.reshape(y_train.shape[0], 1, img_rows, img_cols)
+            y_test = y_test.reshape(y_test.shape[0], 1, img_rows, img_cols)
+            input_shape = (1, img_rows, img_cols)
+        else:
+            x_train = x_train.reshape(x_train.shape[0], img_rows, img_cols, 1)
+            x_test = x_test.reshape(x_test.shape[0], img_rows, img_cols, 1)
+            y_train = y_train.reshape(y_train.shape[0], img_rows, img_cols, 1)
+            y_test = y_test.reshape(y_test.shape[0], img_rows, img_cols, 1)
+            input_shape = (img_rows, img_cols, 1)
+        s = IMAGESPERFILE * HOWMANYPERIMAGE
+        pickleBigDataset('xain',x_train,s)
+        pickleBigDataset('yain',y_train,s)
+        pickleBigDataset('xest',x_test,s)
+        pickleBigDataset('yest',y_test,s)
+
+    print('x_train shape:', x_train.shape)
+    print(x_train.shape[0], 'train samples')
+    print(x_test.shape[0], 'test samples')
+    
+    curr_epoch = -1
+    onlyfiles = [f for f in os.listdir('.') if os.path.isfile(os.path.join('.', f)) and f.startswith('moj_ulubiony_model') and f.endswith('.h5')]
+    if len(onlyfiles) == 0:
+        print("No saved model. Preparing model.")
+        imput = Input(shape=(side,side,1))
+        conv1 = Conv2D(32, 
+                       kernel_size=(3,3),
+                       padding="same", 
+                       activation='relu',
+                       kernel_initializer='he_normal',
+                       kernel_regularizer=l1_l2(0.01),
+                       bias_regularizer=l1_l2(0.01),
+                       activity_regularizer=l1_l2(0.01)
+                      )(imput)
+        conv1 = Conv2D(32,
+                       kernel_size=(3,3),
+                       padding="same", 
+                       activation='relu',
+                       kernel_initializer='he_normal',
+                       kernel_regularizer=l1_l2(0.01),
+                       bias_regularizer=l1_l2(0.01),
+                       activity_regularizer=l1_l2(0.01)
+                      )(conv1)
+        conv1 = Conv2D(32, 
+                       kernel_size=(3,3),
+                       padding="same", 
+                       activation='relu',
+                       kernel_initializer='he_normal',
+                       kernel_regularizer=l1_l2(0.01),
+                       bias_regularizer=l1_l2(0.01),
+                       activity_regularizer=l1_l2(0.01)
+                      )(conv1)
+        dropout1 = Dropout(0.2)(conv1)
+        maxpool1 = MaxPooling2D(pool_size=(2, 2))(dropout1)
+        conv2 = Conv2D(64, 
+                       kernel_size=(3,3),
+                       padding="same", 
+                       activation='relu',
+                       kernel_initializer='he_normal',
+                       kernel_regularizer=l1_l2(0.01),
+                       bias_regularizer=l1_l2(0.01),
+                       activity_regularizer=l1_l2(0.01)
+                      )(maxpool1)
+        conv2 = Conv2D(64, 
+                       kernel_size=(3,3),
+                       padding="same", 
+                       activation='relu',
+                       kernel_initializer='he_normal',
+                       kernel_regularizer=l1_l2(0.01),
+                       bias_regularizer=l1_l2(0.01),
+                       activity_regularizer=l1_l2(0.01)
+                      )(conv2)
+        conv2 = Conv2D(64, 
+                       kernel_size=(3,3),
+                       padding="same", 
+                       activation='relu',
+                       kernel_initializer='he_normal',
+                       kernel_regularizer=l1_l2(0.01),
+                       bias_regularizer=l1_l2(0.01),
+                       activity_regularizer=l1_l2(0.01)
+                      )(conv2)
+        dropout2 = Dropout(0.25)(conv2)
+        maxpool2 = MaxPooling2D(pool_size=(2, 2))(dropout2)
+        conv3 = Conv2D(128, 
+                       kernel_size=(3,3),
+                       padding="same", 
+                       activation='relu',
+                       kernel_initializer='he_normal',
+                       kernel_regularizer=l1_l2(0.01),
+                       bias_regularizer=l1_l2(0.01),
+                       activity_regularizer=l1_l2(0.01)
+                      )(maxpool2)
+        conv3 = Conv2D(128, 
+                       kernel_size=(3,3),
+                       padding="same", 
+                       activation='relu',
+                       kernel_initializer='he_normal',
+                       kernel_regularizer=l1_l2(0.01),
+                       bias_regularizer=l1_l2(0.01),
+                       activity_regularizer=l1_l2(0.01)
+                      )(conv3)
+        conv3 = Conv2D(128, 
+                       kernel_size=(3,3),
+                       padding="same", 
+                       activation='relu',
+                       kernel_initializer='he_normal',
+                       kernel_regularizer=l1_l2(0.01),
+                       bias_regularizer=l1_l2(0.01),
+                       activity_regularizer=l1_l2(0.01)
+                      )(conv3)
+        dropout3 = Dropout(0.25)(conv3)
+        upsample1 = UpSampling2D(size=(2,2))(dropout3)
+        
+        concat1 = concatenate([upsample1,conv2,])#lambda1])
+        conv4 = Conv2D(64, 
+                       kernel_size=(3,3),
+                       padding="same", 
+                       activation='relu',
+                       kernel_initializer='he_normal',
+                       kernel_regularizer=l1_l2(0.01),
+                       bias_regularizer=l1_l2(0.01),
+                       activity_regularizer=l1_l2(0.01)
+                      )(concat1)
+        conv4 = Conv2D(64, 
+                       kernel_size=(3,3),
+                       padding="same", 
+                       activation='relu',
+                       kernel_initializer='he_normal',
+                       kernel_regularizer=l1_l2(0.01),
+                       bias_regularizer=l1_l2(0.01),
+                       activity_regularizer=l1_l2(0.01)
+                      )(conv4)
+        conv4 = Conv2D(64, 
+                       kernel_size=(3,3),
+                       padding="same", 
+                       activation='relu',
+                       kernel_initializer='he_normal',
+                       kernel_regularizer=l1_l2(0.01),
+                       bias_regularizer=l1_l2(0.01),
+                       activity_regularizer=l1_l2(0.01)
+                      )(conv4)
+        dropout4 = Dropout(0.25)(conv4)
+        upsample2 = UpSampling2D(size=(2,2))(dropout4)
+        zpad1 = ZeroPadding2D(((1,0),(1,0)))(upsample2)
+        concat2 = concatenate([zpad1,conv1])
+        conv5 = Conv2D(32, 
+                       kernel_size=(3,3),
+                       padding="same", 
+                       activation='relu',
+                       kernel_initializer='he_normal',
+                       kernel_regularizer=l1_l2(0.01),
+                       bias_regularizer=l1_l2(0.01),
+                       activity_regularizer=l1_l2(0.01)
+                      )(concat2)
+        conv5 = Conv2D(32, 
+                       kernel_size=(3,3),
+                       padding="same", 
+                       activation='relu',
+                       kernel_initializer='he_normal',
+                       kernel_regularizer=l1_l2(0.01),
+                       bias_regularizer=l1_l2(0.01),
+                       activity_regularizer=l1_l2(0.01)
+                      )(conv5)
+        conv5 = Conv2D(1, 
+                       kernel_size=(3,3),
+                       padding="same", 
+                       activation='relu',
+                       kernel_initializer='he_normal',
+                       kernel_regularizer=l1_l2(0.01),
+                       bias_regularizer=l1_l2(0.01),
+                       activity_regularizer=l1_l2(0.01)
+                      )(conv5)
+        model = Model(inputs=imput, outputs=conv5)
+
+        model.compile(loss=keras.losses.mean_squared_error,
+                  optimizer=keras.optimizers.Adam(),       
+                  metrics=['accuracy']) 
+    elif len(onlyfiles) == 1:
+        print("Saved model:\"{}\"".format(onlyfiles[0]))
+        model = keras.models.load_model(onlyfiles[0])
+    else:
+        onlyfiles = map(lambda y:filter(lambda x:x is not None and x.startswith('epoch'),y.split('.')[0].split('_')),onlyfiles)
+        curr_epoch = max(list(map(lambda x:int(x[4:]),onlyfiles)))
+        model = keras.models.load_model("moj_ulubiony_model_epoch{}.h5".format(curr_epoch))
+        print("Saved model:\"moj_ulubiony_model_epoch{}.h5\"".format(curr_epoch))
+    curr_epoch += 1
+    print("Current epoch:{}".format(curr_epoch))
+    model.summary()
+    
+    print("Ala",curr_epoch,epochs)
+    for i in range(curr_epoch,epochs):
+        print("Ala ma kota 1")
+        model.fit(x_train, y_train,
+                      batch_size=batch_size,
+                      epochs=1,
+                      verbose=1,
+                      validation_data=(x_test, y_test))
+        print("Ala ma kota 2")
+        model.save("moj_ulubiony_model_epoch{}.h5".format(i))
+        print("Ala ma kota 3")
+    
+    score = model.evaluate(x_test, y_test, verbose=0)
+    print('Test loss:', score[0])
+    print('Test accuracy:', score[1])
+
+
+# In[7]:
+
+
+if __name__=="__main__":
+    try:
+        doSomeDeepLearning()
+    except MyException as e:
+        urlX = "https://www.cs.toronto.edu/~vmnih/data/mass_roads/train/sat/index.html"
+        urlY = "https://www.cs.toronto.edu/~vmnih/data/mass_roads/train/map/index.html"
+        
+        if LOAD:
+            print("Loading images (X)")
+            X = loadImagesFromSite(urlX,'f')
+        else:
+            X = None
+        if PREPROCESS:
+            print("Preprocessing images (X)")
+            X = preprocess(X,preprocessorX,'x')
+            
+        if LOAD:
+            print("Loading images (Y)")
+            Y = loadImagesFromSite(urlY,'z')
+        else:
+            Y = None
+        
+        if PREPROCESS:
+            print("Preprocessing images (Y)")
+            Y = preprocess(Y,preprocessorY,'y')
+        
+        
+
+            r = preprocessXY(X,Y)
+            print("\n\t| {}".format('Value'))
+            l = ['max','min','avg','std','median']
+            for i,c1 in enumerate(r):  
+                print("{}\t| {}".format(l[i],c1))
+
+        doSomeDeepLearning(X,Y)
+
