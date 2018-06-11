@@ -495,10 +495,13 @@ def doSomeDeepLearning(X=None,Y=None,side=85):
         print("Saved model:\"{}\"".format(onlyfiles[0]))
         model = keras.models.load_model(onlyfiles[0])
     else:
-        onlyfiles = map(lambda y:filter(lambda x:x is not None and x.startswith('epoch'),y.split('.')[0].split('_')),onlyfiles)
-        curr_epoch = max(list(map(lambda x:int(x[4:]),onlyfiles)))
+        # onlyfiles = map(lambda y:filter(lambda x:x is not None and x.startswith('epoch'),y.split('.')[0].split('_')),onlyfiles)
+        curr_epoch = max(list(map(lambda x:int(list(filter(lambda x:x.startswith('epoch'),x.split('.')[0].split('_')))[0][5:]),onlyfiles)) )
         model = keras.models.load_model("moj_ulubiony_model_epoch{}.h5".format(curr_epoch))
         print("Saved model:\"moj_ulubiony_model_epoch{}.h5\"".format(curr_epoch))
+    # model.compile(loss=keras.losses.binary_crossentropy,#mean_squared_error,
+                  # optimizer=keras.optimizers.Adam(),       
+                  # metrics=['accuracy'])
     curr_epoch += 1
     print("Current epoch:{}".format(curr_epoch))
     model.summary()
