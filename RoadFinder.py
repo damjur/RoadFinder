@@ -16,11 +16,13 @@ import os
 
 import keras
 from keras.models import Model
-from keras.layers import Dense, Dropout, Flatten, Input, concatenate
-from keras.layers import Conv2D, MaxPooling2D,UpSampling2D,Lambda, ZeroPadding2D
+from keras.layers import Dense, Dropout, Flatten, Input, concatenate, Reshape
+from keras.layers import Conv2D, MaxPooling2D,UpSampling2D,Lambda, ZeroPadding2D, Activation
 from keras import backend as K
 from sklearn.model_selection import train_test_split
 from keras.regularizers import l1_l2
+from keras.utils import to_categorical
+
 
 import gc
 import re
@@ -41,7 +43,7 @@ FORCE_RELOAD = False#True
 LOAD = False#True
 PREPROCESS = True#False
 batch_size = 128   # ile obrazków przetwarzamy na raz (aktualizacja wag sieci następuje raz na całą grupę obrazków)
-epochs = 12         # ile epok będziemy uczyli
+epochs = 24         # ile epok będziemy uczyli
 SIZE = (750,750)
 SIDE = 75
 IMPOSITION = 5
@@ -215,7 +217,8 @@ def preprocessorX(image):
     #between -1,1
     # for i in range(3):
         # image[...,i] /= np.max(np.abs([image[...,i].min(),image[...,i].max()]))
-    image /= np.max(np.abs([image.min(),image.max()]))
+    norm = np.max(np.abs([image.min(),image.max()]))
+    image /= norm if norm!=0 else 3
 
     return get_patches(image,size,side,imposition)
     
@@ -223,11 +226,12 @@ def preprocessorY(image):
     size,side,imposition = SIZE,SIDE,IMPOSITION
 
     image = image.astype(np.float32)
-    if image.max() > 1:
-        image /= 255
+    # if image.max() > 1:
+        # image /= 255
     # for i in range(3):
         # image[...,i] = (image[...,i] - image[...,i].min())/(image[...,i].max() - image[...,i].min())
-    image = (image - image.min())/(image.max() - image.min())
+    image[image!=0] = 1# = (image - image.min())/(image.max() - image.min())
+    image[image==0] = 0
     return get_patches(image,size,side,imposition)
     
 def getRoadStats(arr,mask):
@@ -305,25 +309,36 @@ def doSomeDeepLearning(X=None,Y=None,side=85):
         x_test = np.array(unpickleBigDataset('xest'))
         y_test = np.array(unpickleBigDataset('yest'))
         if len(x_train)==0 or len(y_train)==0 or len(x_test)==0 or len(y_test)==0:
+            print("Ala ma kota")
             raise Exception
-        if len(x_train) + len(x_test)!=HOWMANY*HOWMANYPERIMAGE:
-            raise MyException
+        # if len(x_train) + len(x_test)!=HOWMANY*HOWMANYPERIMAGE:
+            # print("Ala ma psa")
+            # raise MyException
     except:
         if X is None or Y is None:
             raise MyException
-        x_train, x_test, y_train, y_test = train_test_split(X, Y, test_size=0.3)
+            
+        mask = [not np.all(xyz==0) for xyz in Y]
+        X = X[mask]
+        Y = Y[mask]
+            
+        test_size = 3 * len(X)//10
+        print(test_size,len(X)-test_size)
+        x_train, x_test, y_train, y_test = X[:-test_size],X[-test_size:],Y[:-test_size],Y[-test_size:]#train_test_split(X, Y, test_size=0.3)
         if K.image_data_format() == 'channels_first':
             x_train = x_train.reshape(x_train.shape[0], 1, img_rows, img_cols)
             x_test = x_test.reshape(x_test.shape[0], 1, img_rows, img_cols)
-            y_train = y_train.reshape(y_train.shape[0], 1, img_rows, img_cols)
-            y_test = y_test.reshape(y_test.shape[0], 1, img_rows, img_cols)
+            y_train = y_train.reshape(y_train.shape[0], img_rows*img_cols)
+            y_test = y_test.reshape(y_test.shape[0], img_rows*img_cols)
             input_shape = (1, img_rows, img_cols)
         else:
             x_train = x_train.reshape(x_train.shape[0], img_rows, img_cols, 1)
             x_test = x_test.reshape(x_test.shape[0], img_rows, img_cols, 1)
-            y_train = y_train.reshape(y_train.shape[0], img_rows, img_cols, 1)
-            y_test = y_test.reshape(y_test.shape[0], img_rows, img_cols, 1)
+            y_train = y_train.reshape(y_train.shape[0], img_rows*img_cols)
+            y_test = y_test.reshape(y_test.shape[0], img_rows*img_cols)
             input_shape = (img_rows, img_cols, 1)
+        # y_train= to_categorical(y_train, num_classes=2)
+        # y_test= to_categorical(y_test, num_classes=2)
         s = IMAGESPERFILE * HOWMANYPERIMAGE
         pickleBigDataset('xain',x_train,s)
         pickleBigDataset('yain',y_train,s)
@@ -331,6 +346,7 @@ def doSomeDeepLearning(X=None,Y=None,side=85):
         pickleBigDataset('yest',y_test,s)
 
     print('x_train shape:', x_train.shape)
+    print('y_train shape:', y_train.shape)
     print(x_train.shape[0], 'train samples')
     print(x_test.shape[0], 'test samples')
     
@@ -486,11 +502,13 @@ def doSomeDeepLearning(X=None,Y=None,side=85):
                        bias_regularizer=l1_l2(0.01),
                        activity_regularizer=l1_l2(0.01)
                       )(conv5)
-        model = Model(inputs=imput, outputs=conv5)
+        flat1 = Flatten()(conv5)
+        danse1 = Dense(85*85)(flat1)
+        model = Model(inputs=imput, outputs=danse1)
 
-        model.compile(loss=keras.losses.mean_squared_error,
+        model.compile(loss=create_weighted_binary_crossentropy(0.05,0.95),#keras.losses.binary_crossentropy,#mean_squared_error,#
                   optimizer=keras.optimizers.Adam(),       
-                  metrics=['accuracy']) 
+                  metrics=[max_pred,min_pred,'accuracy'])#'accuracy'])#,'precision','recall'])
     elif len(onlyfiles) == 1:
         print("Saved model:\"{}\"".format(onlyfiles[0]))
         model = keras.models.load_model(onlyfiles[0])
@@ -499,24 +517,23 @@ def doSomeDeepLearning(X=None,Y=None,side=85):
         curr_epoch = max(list(map(lambda x:int(list(filter(lambda x:x.startswith('epoch'),x.split('.')[0].split('_')))[0][5:]),onlyfiles)) )
         model = keras.models.load_model("moj_ulubiony_model_epoch{}.h5".format(curr_epoch))
         print("Saved model:\"moj_ulubiony_model_epoch{}.h5\"".format(curr_epoch))
-    # model.compile(loss=keras.losses.binary_crossentropy,#mean_squared_error,
+    # model.compile(loss=keras.losses.binary_crossentropy,#mean_squared_error,#
                   # optimizer=keras.optimizers.Adam(),       
-                  # metrics=['accuracy'])
+                  # metrics=[max_pred,min_pred,'accuracy'])#'accuracy'])#,'precision','recall'])
     curr_epoch += 1
     print("Current epoch:{}".format(curr_epoch))
     model.summary()
-    
-    print("Ala",curr_epoch,epochs)
+ 
     for i in range(curr_epoch,epochs):
-        print("Ala ma kota 1")
         model.fit(x_train, y_train,
                       batch_size=batch_size,
                       epochs=1,
                       verbose=1,
+                      # class_weight = {0:1, 1:20},
                       validation_data=(x_test, y_test))
-        print("Ala ma kota 2")
         model.save("moj_ulubiony_model_epoch{}.h5".format(i))
-        print("Ala ma kota 3")
+        # tmp = model.predict(x_test)
+        # print("Max:",tmp.max(),"Min:",tmp.min())
     
     score = model.evaluate(x_test, y_test, verbose=0)
     print('Test loss:', score[0])
@@ -525,11 +542,56 @@ def doSomeDeepLearning(X=None,Y=None,side=85):
 
 # In[7]:
 
+def normalize(img,size):
+    if img.max() - img.min() != 0:
+        return ((img - img.min())/(img.max() - img.min())).reshape(size)
+    else:
+        img[img!=0] = 1
+        return img
 
+def myimshow(x,y,i,size):
+    print(x[i].shape)
+    print(y[i].shape)
+    plt.figure()
+    plt.subplot(221)
+    if len(x[i].shape)!=2:
+        plt.imshow(normalize((x[i])[...,1],size))
+    else:
+        plt.imshow(normalize(x[i],size))
+    plt.subplot(222)
+    plt.imshow(normalize(y[i],size))
+    plt.show()
+    
+def max_pred(y_true, y_pred):
+    return K.max(y_pred)
+    
+def min_pred(y_true, y_pred):
+    return K.min(y_pred)
+    
+def create_weighted_binary_crossentropy(zero_weight, one_weight):
+
+    def weighted_binary_crossentropy(y_true, y_pred):
+
+        # Original binary crossentropy (see losses.py):
+        # K.mean(K.binary_crossentropy(y_true, y_pred), axis=-1)
+
+        # Calculate the binary crossentropy
+        b_ce = K.binary_crossentropy(y_true, y_pred)
+
+        # Apply the weights
+        weight_vector = y_true * one_weight + (1. - y_true) * zero_weight
+        weighted_b_ce = weight_vector * b_ce
+
+        # Return the mean error
+        return K.mean(weighted_b_ce)
+
+    return weighted_binary_crossentropy
+    
 if __name__=="__main__":
     try:
         doSomeDeepLearning()
     except MyException as e:
+        
         urlX = "https://www.cs.toronto.edu/~vmnih/data/mass_roads/train/sat/index.html"
         urlY = "https://www.cs.toronto.edu/~vmnih/data/mass_roads/train/map/index.html"
         
@@ -538,15 +600,21 @@ if __name__=="__main__":
             X = loadImagesFromSite(urlX,'f')
         else:
             X = None
-        if PREPROCESS:
-            print("Preprocessing images (X)")
-            X = preprocess(X,preprocessorX,'x')
             
         if LOAD:
             print("Loading images (Y)")
             Y = loadImagesFromSite(urlY,'z')
         else:
             Y = None
+            
+        # for i in range(HOWMANY):
+            # myimshow(X,Y,i,(750,750))
+            
+        if PREPROCESS:
+            print("Preprocessing images (X)")
+            X = preprocess(X,preprocessorX,'x')
+            
+        
         
         if PREPROCESS:
             print("Preprocessing images (Y)")
@@ -554,11 +622,13 @@ if __name__=="__main__":
         
         
 
-            r = preprocessXY(X,Y)
-            print("\n\t| {}".format('Value'))
-            l = ['max','min','avg','std','median']
-            for i,c1 in enumerate(r):  
-                print("{}\t| {}".format(l[i],c1))
+            # r = preprocessXY(X,Y)
+            # print("\n\t| {}".format('Value'))
+            # l = ['max','min','avg','std','median']
+            # for i,c1 in enumerate(r):  
+                # print("{}\t| {}".format(l[i],c1))
+        # for i in range(HOWMANY*HOWMANYPERIMAGE):
+            # myimshow(X,Y,i,(85,85))
 
         doSomeDeepLearning(X,Y)
 
