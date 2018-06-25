@@ -16,7 +16,7 @@ import os
 
 import keras
 from keras.models import Model
-from keras.layers import Dense, Dropout, Flatten, Input, concatenate, Reshape
+from keras.layers import Dense, Dropout, Flatten, Input, concatenate, Reshape, BatchNormalization
 from keras.layers import Conv2D, MaxPooling2D,UpSampling2D,Lambda, ZeroPadding2D, Activation
 from keras import backend as K
 from sklearn.model_selection import train_test_split
@@ -27,6 +27,7 @@ from keras.utils import to_categorical
 import gc
 import re
 
+np.errstate(invalid='raise')
 
 class MyException(Exception):
     pass
@@ -40,7 +41,7 @@ MAXLINKS = 1109
 DEBUG = True
 TMP_DIR = 'D:\\tmp'
 FORCE_RELOAD = False#True
-LOAD = False#True
+LOAD = True
 PREPROCESS = True#False
 batch_size = 128   # ile obrazków przetwarzamy na raz (aktualizacja wag sieci następuje raz na całą grupę obrazków)
 epochs = 24         # ile epok będziemy uczyli
@@ -49,6 +50,7 @@ SIDE = 75
 IMPOSITION = 5
 HOWMANYPERIMAGE = int(SIZE[0]*SIZE[1]/SIDE/SIDE)
 IMAGESPERFILE = 100
+CLASS_ZERO = -1
 assert int(SIZE[0]*SIZE[1]/SIDE/SIDE)==HOWMANYPERIMAGE
 
 
@@ -78,7 +80,7 @@ def pickleBigDataset(prefix,dataset,size):
         np.save(os.path.join(TMP_DIR, prefix+str(i)),np.array(dataset[size*(i-1):size*i]))
         
 def getNumber(prefix):
-    d = np.dstack(([int(re.findall('\d+',f)[0]) for f in os.listdir(TMP_DIR) if os.path.isfile(os.path.join(TMP_DIR, f)) and f.startswith(prefix) and f.endswith('.npy')],
+    d = np.dstack(([int(re.findall('\\d+',f)[0]) for f in os.listdir(TMP_DIR) if os.path.isfile(os.path.join(TMP_DIR, f)) and f.startswith(prefix) and f.endswith('.npy')],
     [int(os.path.getsize(os.path.join(TMP_DIR, f))) for f in os.listdir(TMP_DIR) if os.path.isfile(os.path.join(TMP_DIR, f)) and f.startswith(prefix)]))[0]
     return d[d[:,1]==d[:,1].max()][:,0].max()+1 
 
@@ -195,32 +197,58 @@ def get_patches(image,size,side,imposition):
             patches += [image[imp1:imp2,imp3:imp4]]
     return patches
 
+# def preprocessorX(image):
+    # size,side,imposition = SIZE,SIDE,IMPOSITION
+    # image = cv2.cvtColor(image, cv2.COLOR_BGR2HSV)[...,2]
+
+    # image = image.astype(np.float32)
+
+    # if image.max() > 1:
+        # image /= 255
+
+    # image -= image.mean()
+    # image /= image.std()
+
+    # image[image<-3] = -3
+    # image[image>3] = 3
+
+    # norm = np.max(np.abs([image.min(),image.max()]))
+    # image /= norm if norm!=0 else 3
+
+    # return get_patches(image,size,side,imposition)
+    
 def preprocessorX(image):
     size,side,imposition = SIZE,SIDE,IMPOSITION
-    image = cv2.cvtColor(image, cv2.COLOR_BGR2HSV)[...,2]
+    image = cv2.cvtColor(image, cv2.COLOR_BGR2HSV)[...,0]
 
-    image = image.astype(np.float32)
+    image = image.astype(np.uint8)
+    image = cv2.fastNlMeansDenoising(image,None,9,13)
+    #korekcja gamma
+    image = image**0.9
+    
+    patches = get_patches(image,size,side,imposition)
 
-    if image.max() > 1:
-        image /= 255
+    for j in range(len(patches)):        
+        patches[j] = patches[j].astype(np.float32)
+    
+        dzielnik = patches[j].std()
+        patches[j] -= patches[j].mean()
+        if dzielnik!=0:
+            patches[j] /= dzielnik
 
-    # for i in range(3):
-        # image[...,i] -= image[...,i].mean()
-        # image[...,i] /= image[...,i].std()
-    image -= image.mean()
-    image /= image.std()
-
-    #remove outliers
-    image[image<-3] = -3
-    image[image>3] = 3
-
-    #between -1,1
-    # for i in range(3):
-        # image[...,i] /= np.max(np.abs([image[...,i].min(),image[...,i].max()]))
-    norm = np.max(np.abs([image.min(),image.max()]))
-    image /= norm if norm!=0 else 3
-
-    return get_patches(image,size,side,imposition)
+        #remove outliers
+        patches[j][patches[j]<-3] = -3
+        patches[j][patches[j]>3] = 3
+        
+        #between -1,1
+        for i in range(3):
+            dzielnik = np.max(np.abs([patches[j].min(),patches[j].max()]))
+            if dzielnik != 0:
+                patches[j] /= dzielnik       
+        # cv2.morphologyEx(patches[j],cv2.MORPH_OPEN,cv2.getStructuringElement(cv2.MORPH_RECT,(3,3)))
+        # cv2.morphologyEx(patches[j],cv2.MORPH_CLOSE,cv2.getStructuringElement(cv2.MORPH_RECT,(5,5)))
+        
+    return patches
     
 def preprocessorY(image):
     size,side,imposition = SIZE,SIDE,IMPOSITION
@@ -309,7 +337,7 @@ def doSomeDeepLearning(X=None,Y=None,side=85):
         x_test = np.array(unpickleBigDataset('xest'))
         y_test = np.array(unpickleBigDataset('yest'))
         if len(x_train)==0 or len(y_train)==0 or len(x_test)==0 or len(y_test)==0:
-            print("Ala ma kota")
+            
             raise Exception
         # if len(x_train) + len(x_test)!=HOWMANY*HOWMANYPERIMAGE:
             # print("Ala ma psa")
@@ -318,24 +346,29 @@ def doSomeDeepLearning(X=None,Y=None,side=85):
         if X is None or Y is None:
             raise MyException
             
-        mask = [not np.all(xyz==0) for xyz in Y]
+        mask = [not np.all(xyz==xyz.mean()) for xyz in Y]
         X = X[mask]
         Y = Y[mask]
-            
-        test_size = 3 * len(X)//10
-        print(test_size,len(X)-test_size)
+        print(len(X))
+        mask = [not np.all(xyz==xyz.mean()) for xyz in X]
+        X = X[mask]
+        Y = Y[mask]
+        print(len(X))
+                    
+        test_size = 1 * len(X)//10
+        
         x_train, x_test, y_train, y_test = X[:-test_size],X[-test_size:],Y[:-test_size],Y[-test_size:]#train_test_split(X, Y, test_size=0.3)
         if K.image_data_format() == 'channels_first':
             x_train = x_train.reshape(x_train.shape[0], 1, img_rows, img_cols)
             x_test = x_test.reshape(x_test.shape[0], 1, img_rows, img_cols)
-            y_train = y_train.reshape(y_train.shape[0], img_rows*img_cols)
-            y_test = y_test.reshape(y_test.shape[0], img_rows*img_cols)
+            y_train = y_train.reshape(y_train.shape[0],1, img_rows,img_cols)
+            y_test = y_test.reshape(y_test.shape[0],1, img_rows,img_cols)
             input_shape = (1, img_rows, img_cols)
         else:
             x_train = x_train.reshape(x_train.shape[0], img_rows, img_cols, 1)
             x_test = x_test.reshape(x_test.shape[0], img_rows, img_cols, 1)
-            y_train = y_train.reshape(y_train.shape[0], img_rows*img_cols)
-            y_test = y_test.reshape(y_test.shape[0], img_rows*img_cols)
+            y_train = y_train.reshape(y_train.shape[0], img_rows,img_cols,1)
+            y_test = y_test.reshape(y_test.shape[0], img_rows,img_cols,1)
             input_shape = (img_rows, img_cols, 1)
         # y_train= to_categorical(y_train, num_classes=2)
         # y_test= to_categorical(y_test, num_classes=2)
@@ -352,177 +385,293 @@ def doSomeDeepLearning(X=None,Y=None,side=85):
     
     curr_epoch = -1
     onlyfiles = [f for f in os.listdir('.') if os.path.isfile(os.path.join('.', f)) and f.startswith('moj_ulubiony_model') and f.endswith('.h5')]
+    o1 = (y_train.sum()+y_test.sum())/(y_train.size+y_test.size)
+    custom_objects={'weighted_binary_crossentropy':create_weighted_binary_crossentropy(o1,1 - o1),'max_pred':max_pred,'min_pred':min_pred,'mean_pred':mean_pred,'relu_advanced':relu_advanced}
     if len(onlyfiles) == 0:
         print("No saved model. Preparing model.")
         imput = Input(shape=(side,side,1))
+        activationConv=relu_advanced
+        initializationConv='he_normal'
+        kernelSizeConv=(5,5)
         conv1 = Conv2D(32, 
-                       kernel_size=(3,3),
+                       kernel_size=kernelSizeConv,
                        padding="same", 
-                       activation='relu',
-                       kernel_initializer='he_normal',
+                       # activation=activationConv,
+                       kernel_initializer=initializationConv,
                        kernel_regularizer=l1_l2(0.01),
                        bias_regularizer=l1_l2(0.01),
                        activity_regularizer=l1_l2(0.01)
                       )(imput)
         conv1 = Conv2D(32,
-                       kernel_size=(3,3),
+                       kernel_size=kernelSizeConv,
                        padding="same", 
-                       activation='relu',
-                       kernel_initializer='he_normal',
+                       # activation=activationConv,
+                       kernel_initializer=initializationConv,
+                       kernel_regularizer=l1_l2(0.01),
+                       bias_regularizer=l1_l2(0.01),
+                       activity_regularizer=l1_l2(0.01)
+                      )(conv1)
+        conv1 = Conv2D(32,
+                       kernel_size=kernelSizeConv,
+                       padding="same", 
+                       # activation=activationConv,
+                       kernel_initializer=initializationConv,
                        kernel_regularizer=l1_l2(0.01),
                        bias_regularizer=l1_l2(0.01),
                        activity_regularizer=l1_l2(0.01)
                       )(conv1)
         conv1 = Conv2D(32, 
-                       kernel_size=(3,3),
+                       kernel_size=kernelSizeConv,
                        padding="same", 
-                       activation='relu',
-                       kernel_initializer='he_normal',
+                       activation=activationConv,
+                       kernel_initializer=initializationConv,
                        kernel_regularizer=l1_l2(0.01),
                        bias_regularizer=l1_l2(0.01),
                        activity_regularizer=l1_l2(0.01)
                       )(conv1)
-        dropout1 = Dropout(0.2)(conv1)
-        maxpool1 = MaxPooling2D(pool_size=(2, 2))(dropout1)
+        # dropout1 = Dropout(0.2)(conv1)
+        maxpool1 = MaxPooling2D(pool_size=(2, 2))(conv1)
+        bn1 = BatchNormalization()(maxpool1)
+        
         conv2 = Conv2D(64, 
-                       kernel_size=(3,3),
+                       kernel_size=kernelSizeConv,
                        padding="same", 
-                       activation='relu',
-                       kernel_initializer='he_normal',
+                       # activation=activationConv,
+                       kernel_initializer=initializationConv,
                        kernel_regularizer=l1_l2(0.01),
                        bias_regularizer=l1_l2(0.01),
                        activity_regularizer=l1_l2(0.01)
-                      )(maxpool1)
+                      )(bn1)#maxpool1)
         conv2 = Conv2D(64, 
-                       kernel_size=(3,3),
+                       kernel_size=kernelSizeConv,
                        padding="same", 
-                       activation='relu',
-                       kernel_initializer='he_normal',
+                       # activation=activationConv,
+                       kernel_initializer=initializationConv,
                        kernel_regularizer=l1_l2(0.01),
                        bias_regularizer=l1_l2(0.01),
                        activity_regularizer=l1_l2(0.01)
                       )(conv2)
         conv2 = Conv2D(64, 
-                       kernel_size=(3,3),
+                       kernel_size=kernelSizeConv,
                        padding="same", 
-                       activation='relu',
-                       kernel_initializer='he_normal',
+                       # activation=activationConv,
+                       kernel_initializer=initializationConv,
                        kernel_regularizer=l1_l2(0.01),
                        bias_regularizer=l1_l2(0.01),
                        activity_regularizer=l1_l2(0.01)
                       )(conv2)
-        dropout2 = Dropout(0.25)(conv2)
-        maxpool2 = MaxPooling2D(pool_size=(2, 2))(dropout2)
-        conv3 = Conv2D(128, 
-                       kernel_size=(3,3),
+        conv2 = Conv2D(64, 
+                       kernel_size=kernelSizeConv,
                        padding="same", 
-                       activation='relu',
-                       kernel_initializer='he_normal',
+                       activation=activationConv,
+                       kernel_initializer=initializationConv,
                        kernel_regularizer=l1_l2(0.01),
                        bias_regularizer=l1_l2(0.01),
                        activity_regularizer=l1_l2(0.01)
-                      )(maxpool2)
+                      )(conv2)
+        # dropout2 = Dropout(0.25)(conv2)
+        maxpool2 = MaxPooling2D(pool_size=(2, 2))(conv2)
+        bn2 = BatchNormalization()(maxpool2)
+        
         conv3 = Conv2D(128, 
-                       kernel_size=(3,3),
+                       kernel_size=kernelSizeConv,
                        padding="same", 
-                       activation='relu',
-                       kernel_initializer='he_normal',
+                       # activation=activationConv,
+                       kernel_initializer=initializationConv,
+                       kernel_regularizer=l1_l2(0.01),
+                       bias_regularizer=l1_l2(0.01),
+                       activity_regularizer=l1_l2(0.01)
+                      )(bn2)#maxpool2)
+        conv3 = Conv2D(128, 
+                       kernel_size=kernelSizeConv,
+                       padding="same", 
+                       # activation=activationConv,
+                       kernel_initializer=initializationConv,
                        kernel_regularizer=l1_l2(0.01),
                        bias_regularizer=l1_l2(0.01),
                        activity_regularizer=l1_l2(0.01)
                       )(conv3)
         conv3 = Conv2D(128, 
-                       kernel_size=(3,3),
+                       kernel_size=kernelSizeConv,
                        padding="same", 
-                       activation='relu',
-                       kernel_initializer='he_normal',
+                       activation=activationConv,
+                       kernel_initializer=initializationConv,
                        kernel_regularizer=l1_l2(0.01),
                        bias_regularizer=l1_l2(0.01),
                        activity_regularizer=l1_l2(0.01)
                       )(conv3)
-        dropout3 = Dropout(0.25)(conv3)
-        upsample1 = UpSampling2D(size=(2,2))(dropout3)
+        conv3 = Conv2D(128, 
+                       kernel_size=kernelSizeConv,
+                       padding="same", 
+                       activation=activationConv,
+                       kernel_initializer=initializationConv,
+                       kernel_regularizer=l1_l2(0.01),
+                       bias_regularizer=l1_l2(0.01),
+                       activity_regularizer=l1_l2(0.01)
+                      )(conv3)              
+        # maxpool12 = MaxPooling2D(pool_size=(2, 2))(conv3)
+        # conv13 = Conv2D(256, 
+                       # kernel_size=kernelSizeConv,
+                       # padding="same", 
+                       ##activation=activationConv,
+                       # kernel_initializer=initializationConv,
+                       # kernel_regularizer=l1_l2(0.01),
+                       # bias_regularizer=l1_l2(0.01),
+                       # activity_regularizer=l1_l2(0.01)
+                      # )(maxpool12)
+        # conv13 = Conv2D(256, 
+                       # kernel_size=kernelSizeConv,
+                       # padding="same", 
+                       ##activation=activationConv,
+                       # kernel_initializer=initializationConv,
+                       # kernel_regularizer=l1_l2(0.01),
+                       # bias_regularizer=l1_l2(0.01),
+                       # activity_regularizer=l1_l2(0.01)
+                      # )(conv13)
+        # conv13 = Conv2D(256, 
+                       # kernel_size=kernelSizeConv,
+                       # padding="same", 
+                       # activation=activationConv,
+                       # kernel_initializer=initializationConv,
+                       # kernel_regularizer=l1_l2(0.01),
+                       # bias_regularizer=l1_l2(0.01),
+                       # activity_regularizer=l1_l2(0.01)
+                      # )(conv13)
+                      
+        # upsample11 = UpSampling2D(size=(2,2))(conv13)
+        # zpad11 = ZeroPadding2D(((1,0),(1,0)))(upsample11)
+        # concat11 = concatenate([zpad11,conv3,])#lambda1])
+
+        # conv23 = Conv2D(128, 
+                       # kernel_size=kernelSizeConv,
+                       # padding="same", 
+                       ##activation=activationConv,
+                       # kernel_initializer=initializationConv,
+                       # kernel_regularizer=l1_l2(0.01),
+                       # bias_regularizer=l1_l2(0.01),
+                       # activity_regularizer=l1_l2(0.01)
+                      # )(upsample11)
+        # conv23 = Conv2D(128, 
+                       # kernel_size=kernelSizeConv,
+                       # padding="same", 
+                       ##activation=activationConv,
+                       # kernel_initializer=initializationConv,
+                       # kernel_regularizer=l1_l2(0.01),
+                       # bias_regularizer=l1_l2(0.01),
+                       # activity_regularizer=l1_l2(0.01)
+                      # )(conv23)
+        # conv23 = Conv2D(128, 
+                       # kernel_size=kernelSizeConv,
+                       # padding="same", 
+                       # activation=activationConv,
+                       # kernel_initializer=initializationConv,
+                       # kernel_regularizer=l1_l2(0.01),
+                       # bias_regularizer=l1_l2(0.01),
+                       # activity_regularizer=l1_l2(0.01)
+                      # )(conv23)
+        # dropout3 = Dropout(0.25)(conv3)
+        upsample1 = UpSampling2D(size=(2,2))(conv3)
+        
         
         concat1 = concatenate([upsample1,conv2,])#lambda1])
+        bn3 = BatchNormalization()(concat1)
         conv4 = Conv2D(64, 
-                       kernel_size=(3,3),
+                       kernel_size=kernelSizeConv,
                        padding="same", 
-                       activation='relu',
-                       kernel_initializer='he_normal',
+                       # activation=activationConv,
+                       kernel_initializer=initializationConv,
                        kernel_regularizer=l1_l2(0.01),
                        bias_regularizer=l1_l2(0.01),
                        activity_regularizer=l1_l2(0.01)
-                      )(concat1)
+                      )(bn3)#concat1)
         conv4 = Conv2D(64, 
-                       kernel_size=(3,3),
+                       kernel_size=kernelSizeConv,
                        padding="same", 
-                       activation='relu',
-                       kernel_initializer='he_normal',
+                       # activation=activationConv,
+                       kernel_initializer=initializationConv,
+                       kernel_regularizer=l1_l2(0.01),
+                       bias_regularizer=l1_l2(0.01),
+                       activity_regularizer=l1_l2(0.01)
+                      )(conv4)
+        conv4 = Conv2D(64, 
+                       kernel_size=kernelSizeConv,
+                       padding="same", 
+                       # activation=activationConv,
+                       kernel_initializer=initializationConv,
                        kernel_regularizer=l1_l2(0.01),
                        bias_regularizer=l1_l2(0.01),
                        activity_regularizer=l1_l2(0.01)
                       )(conv4)
         conv4 = Conv2D(64, 
-                       kernel_size=(3,3),
+                       kernel_size=kernelSizeConv,
                        padding="same", 
-                       activation='relu',
-                       kernel_initializer='he_normal',
+                       activation=activationConv,
+                       kernel_initializer=initializationConv,
                        kernel_regularizer=l1_l2(0.01),
                        bias_regularizer=l1_l2(0.01),
                        activity_regularizer=l1_l2(0.01)
                       )(conv4)
-        dropout4 = Dropout(0.25)(conv4)
-        upsample2 = UpSampling2D(size=(2,2))(dropout4)
+        # dropout4 = Dropout(0.25)(conv4)
+        upsample2 = UpSampling2D(size=(2,2))(conv4)
         zpad1 = ZeroPadding2D(((1,0),(1,0)))(upsample2)
         concat2 = concatenate([zpad1,conv1])
+        bn4 = BatchNormalization()(concat2)
         conv5 = Conv2D(32, 
-                       kernel_size=(3,3),
+                       kernel_size=kernelSizeConv,
                        padding="same", 
-                       activation='relu',
-                       kernel_initializer='he_normal',
+                       # activation=activationConv,
+                       kernel_initializer=initializationConv,
                        kernel_regularizer=l1_l2(0.01),
                        bias_regularizer=l1_l2(0.01),
                        activity_regularizer=l1_l2(0.01)
-                      )(concat2)
+                      )(bn4)#concat2)
         conv5 = Conv2D(32, 
-                       kernel_size=(3,3),
+                       kernel_size=kernelSizeConv,
                        padding="same", 
-                       activation='relu',
-                       kernel_initializer='he_normal',
+                       # activation=activationConv,
+                       kernel_initializer=initializationConv,
+                       kernel_regularizer=l1_l2(0.01),
+                       bias_regularizer=l1_l2(0.01),
+                       activity_regularizer=l1_l2(0.01)
+                      )(conv5)
+        conv5 = Conv2D(32, 
+                       kernel_size=kernelSizeConv,
+                       padding="same", 
+                       # activation=activationConv,
+                       kernel_initializer=initializationConv,
                        kernel_regularizer=l1_l2(0.01),
                        bias_regularizer=l1_l2(0.01),
                        activity_regularizer=l1_l2(0.01)
                       )(conv5)
         conv5 = Conv2D(1, 
-                       kernel_size=(3,3),
+                       kernel_size=kernelSizeConv,
                        padding="same", 
-                       activation='relu',
-                       kernel_initializer='he_normal',
+                       activation=activationConv,
+                       kernel_initializer=initializationConv,
                        kernel_regularizer=l1_l2(0.01),
                        bias_regularizer=l1_l2(0.01),
                        activity_regularizer=l1_l2(0.01)
                       )(conv5)
-        flat1 = Flatten()(conv5)
-        danse1 = Dense(85*85)(flat1)
-        model = Model(inputs=imput, outputs=danse1)
+        model = Model(inputs=imput, outputs=conv5)
 
-        model.compile(loss=create_weighted_binary_crossentropy(0.05,0.95),#keras.losses.binary_crossentropy,#mean_squared_error,#
+        model.compile(loss=create_weighted_binary_crossentropy(o1,1-o1),
+        #keras.losses.binary_crossentropy,#keras.losses.mean_squared_error,#
                   optimizer=keras.optimizers.Adam(),       
-                  metrics=[max_pred,min_pred,'accuracy'])#'accuracy'])#,'precision','recall'])
+                  metrics=[max_pred,mean_pred,min_pred,'binary_accuracy'])#'accuracy'])#,'precision','recall'])
     elif len(onlyfiles) == 1:
         print("Saved model:\"{}\"".format(onlyfiles[0]))
-        model = keras.models.load_model(onlyfiles[0])
+        model = keras.models.load_model(onlyfiles[0],custom_objects=custom_objects)
     else:
         # onlyfiles = map(lambda y:filter(lambda x:x is not None and x.startswith('epoch'),y.split('.')[0].split('_')),onlyfiles)
         curr_epoch = max(list(map(lambda x:int(list(filter(lambda x:x.startswith('epoch'),x.split('.')[0].split('_')))[0][5:]),onlyfiles)) )
-        model = keras.models.load_model("moj_ulubiony_model_epoch{}.h5".format(curr_epoch))
+        model = keras.models.load_model("moj_ulubiony_model_epoch{}.h5".format(curr_epoch),custom_objects=custom_objects)
         print("Saved model:\"moj_ulubiony_model_epoch{}.h5\"".format(curr_epoch))
-    # model.compile(loss=keras.losses.binary_crossentropy,#mean_squared_error,#
-                  # optimizer=keras.optimizers.Adam(),       
-                  # metrics=[max_pred,min_pred,'accuracy'])#'accuracy'])#,'precision','recall'])
+
     curr_epoch += 1
     print("Current epoch:{}".format(curr_epoch))
     model.summary()
+    
+    
  
     for i in range(curr_epoch,epochs):
         model.fit(x_train, y_train,
@@ -568,24 +717,24 @@ def max_pred(y_true, y_pred):
 def min_pred(y_true, y_pred):
     return K.min(y_pred)
     
+def mean_pred(y_true, y_pred):
+    return K.mean(y_pred)
+    
+def relu_advanced(x):
+    return K.relu(x, alpha=0.001, max_value=1)
+    
 def create_weighted_binary_crossentropy(zero_weight, one_weight):
 
     def weighted_binary_crossentropy(y_true, y_pred):
 
         # Original binary crossentropy (see losses.py):
         # K.mean(K.binary_crossentropy(y_true, y_pred), axis=-1)
-
-        # Calculate the binary crossentropy
-        b_ce = K.binary_crossentropy(y_true, y_pred)
-
-        # Apply the weights
-        weight_vector = y_true * one_weight + (1. - y_true) * zero_weight
-        weighted_b_ce = weight_vector * b_ce
-
-        # Return the mean error
-        return K.mean(weighted_b_ce)
+        k = (y_true+1)//2
+        return K.mean((k * one_weight + (1. - k) * zero_weight)*K.binary_crossentropy(y_true, y_pred))
 
     return weighted_binary_crossentropy
+
+
     
 if __name__=="__main__":
     try:
