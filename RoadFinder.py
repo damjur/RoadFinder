@@ -43,7 +43,7 @@ TMP_DIR = 'D:\\tmp'
 FORCE_RELOAD = False#True
 LOAD = True
 PREPROCESS = True#False
-batch_size = 128   # ile obrazków przetwarzamy na raz (aktualizacja wag sieci następuje raz na całą grupę obrazków)
+batch_size = 32   # ile obrazków przetwarzamy na raz (aktualizacja wag sieci następuje raz na całą grupę obrazków)
 epochs = 24         # ile epok będziemy uczyli
 SIZE = (750,750)
 SIDE = 75
@@ -197,6 +197,7 @@ def get_patches(image,size,side,imposition):
             patches += [image[imp1:imp2,imp3:imp4]]
     return patches
 
+    #v1
 # def preprocessorX(image):
     # size,side,imposition = SIZE,SIDE,IMPOSITION
     # image = cv2.cvtColor(image, cv2.COLOR_BGR2HSV)[...,2]
@@ -217,38 +218,89 @@ def get_patches(image,size,side,imposition):
 
     # return get_patches(image,size,side,imposition)
     
+    #v2
+# def preprocessorX(image):
+    # size,side,imposition = SIZE,SIDE,IMPOSITION
+    # image = cv2.cvtColor(image, cv2.COLOR_BGR2HSV)[...,0]
+
+    # image = image.astype(np.uint8)
+    # image = cv2.fastNlMeansDenoising(image,None,9,13)
+    # image = image**0.9
+    
+    # patches = get_patches(image,size,side,imposition)
+
+    # for j in range(len(patches)):        
+        # patches[j] = patches[j].astype(np.float32)
+    
+        # dzielnik = patches[j].std()
+        # patches[j] -= patches[j].mean()
+        # if dzielnik!=0:
+            # patches[j] /= dzielnik
+
+        # patches[j][patches[j]<-3] = -3
+        # patches[j][patches[j]>3] = 3
+        
+        # for i in range(3):
+            # dzielnik = np.max(np.abs([patches[j].min(),patches[j].max()]))
+            # if dzielnik != 0:
+                # patches[j] /= dzielnik       
+                
+    # return patches
+    
+    #v3
 def preprocessorX(image):
+    # size,side,imposition = SIZE,SIDE,IMPOSITION
+    # image = cv2.cvtColor(image, cv2.COLOR_BGR2HSV)
+
+    # mask = np.zeros_like(image).astype(np.int)
+    
+    # a,b,c,d = 21,12,8,-1
+    # mask[image[...,2]<(150+b)]+=1
+    # mask[image[...,2]<(110+a)]+=1
+    # mask[image[...,1]<(35+d)]+=1
+    # mask[image[...,1]<(5+c)]+=1
+    # mask[mask!=4] = 0
+    # mask[mask==4] = 1
+    
+    # kernel = np.ones((5,5),np.uint8)
+    # opening = cv2.morphologyEx(mask.astype(np.float32),cv2.MORPH_CLOSE,kernel)
+    # mask = cv2.morphologyEx(opening.astype(np.float32),cv2.MORPH_OPEN,kernel)
+    
+    
+    # return get_patches(mask,size,side,imposition)
+    
     size,side,imposition = SIZE,SIDE,IMPOSITION
     image = cv2.cvtColor(image, cv2.COLOR_BGR2HSV)[...,0]
 
     image = image.astype(np.uint8)
     image = cv2.fastNlMeansDenoising(image,None,9,13)
-    #korekcja gamma
     image = image**0.9
     
+    image[image<50] = 0
+    image[image>90] = 0
+    # image[image!=0] = 1
+    kernel = np.ones((3,3),np.uint8)
+    opening = cv2.morphologyEx(image.astype(np.float32),cv2.MORPH_CLOSE,kernel)
+    image = cv2.morphologyEx(opening.astype(np.float32),cv2.MORPH_OPEN,kernel)
+    
     patches = get_patches(image,size,side,imposition)
-
+    
     for j in range(len(patches)):        
         patches[j] = patches[j].astype(np.float32)
     
-        dzielnik = patches[j].std()
-        patches[j] -= patches[j].mean()
+        dzielnik = patches[j].max() - patches[j].min()
+        patches[j] -= patches[j].min()
         if dzielnik!=0:
             patches[j] /= dzielnik
 
-        #remove outliers
-        patches[j][patches[j]<-3] = -3
-        patches[j][patches[j]>3] = 3
         
-        #between -1,1
-        for i in range(3):
-            dzielnik = np.max(np.abs([patches[j].min(),patches[j].max()]))
-            if dzielnik != 0:
-                patches[j] /= dzielnik       
-        # cv2.morphologyEx(patches[j],cv2.MORPH_OPEN,cv2.getStructuringElement(cv2.MORPH_RECT,(3,3)))
-        # cv2.morphologyEx(patches[j],cv2.MORPH_CLOSE,cv2.getStructuringElement(cv2.MORPH_RECT,(5,5)))
         
+        
+        
+                
     return patches
+
+    
     
 def preprocessorY(image):
     size,side,imposition = SIZE,SIDE,IMPOSITION
@@ -346,16 +398,16 @@ def doSomeDeepLearning(X=None,Y=None,side=85):
         if X is None or Y is None:
             raise MyException
             
-        mask = [not np.all(xyz==xyz.mean()) for xyz in Y]
-        X = X[mask]
-        Y = Y[mask]
-        print(len(X))
+        # mask = [not np.all(xyz==xyz.mean()) for xyz in Y]
+        # X = X[mask]
+        # Y = Y[mask]
+        # print(len(X))
         mask = [not np.all(xyz==xyz.mean()) for xyz in X]
         X = X[mask]
         Y = Y[mask]
         print(len(X))
                     
-        test_size = 1 * len(X)//10
+        test_size = 3 * len(X)//10
         
         x_train, x_test, y_train, y_test = X[:-test_size],X[-test_size:],Y[:-test_size],Y[-test_size:]#train_test_split(X, Y, test_size=0.3)
         if K.image_data_format() == 'channels_first':
@@ -386,7 +438,8 @@ def doSomeDeepLearning(X=None,Y=None,side=85):
     curr_epoch = -1
     onlyfiles = [f for f in os.listdir('.') if os.path.isfile(os.path.join('.', f)) and f.startswith('moj_ulubiony_model') and f.endswith('.h5')]
     o1 = (y_train.sum()+y_test.sum())/(y_train.size+y_test.size)
-    custom_objects={'weighted_binary_crossentropy':create_weighted_binary_crossentropy(o1,1 - o1),'max_pred':max_pred,'min_pred':min_pred,'mean_pred':mean_pred,'relu_advanced':relu_advanced}
+    print(o1)
+    custom_objects={'weighted_binary_crossentropy':create_weighted_binary_crossentropy(o1,1 - o1),'max_pred':max_pred,'min_pred':min_pred,'mean_pred':mean_pred,'relu_advanced':relu_advanced,'weighted_mean_squared_error':create_weighted_mean_squared_error(o1,1-o1)}
     if len(onlyfiles) == 0:
         print("No saved model. Preparing model.")
         imput = Input(shape=(side,side,1))
@@ -396,25 +449,25 @@ def doSomeDeepLearning(X=None,Y=None,side=85):
         conv1 = Conv2D(32, 
                        kernel_size=kernelSizeConv,
                        padding="same", 
-                       # activation=activationConv,
+                       #activation=activationConv,
                        kernel_initializer=initializationConv,
                        kernel_regularizer=l1_l2(0.01),
                        bias_regularizer=l1_l2(0.01),
                        activity_regularizer=l1_l2(0.01)
                       )(imput)
+        # conv1 = Conv2D(32,
+                       # kernel_size=kernelSizeConv,
+                       # padding="same", 
+                       ##activation=activationConv,
+                       # kernel_initializer=initializationConv,
+                       # kernel_regularizer=l1_l2(0.01),
+                       # bias_regularizer=l1_l2(0.01),
+                       # activity_regularizer=l1_l2(0.01)
+                      # )(conv1)
         conv1 = Conv2D(32,
                        kernel_size=kernelSizeConv,
                        padding="same", 
-                       # activation=activationConv,
-                       kernel_initializer=initializationConv,
-                       kernel_regularizer=l1_l2(0.01),
-                       bias_regularizer=l1_l2(0.01),
-                       activity_regularizer=l1_l2(0.01)
-                      )(conv1)
-        conv1 = Conv2D(32,
-                       kernel_size=kernelSizeConv,
-                       padding="same", 
-                       # activation=activationConv,
+                       #activation=activationConv,
                        kernel_initializer=initializationConv,
                        kernel_regularizer=l1_l2(0.01),
                        bias_regularizer=l1_l2(0.01),
@@ -433,33 +486,33 @@ def doSomeDeepLearning(X=None,Y=None,side=85):
         maxpool1 = MaxPooling2D(pool_size=(2, 2))(conv1)
         bn1 = BatchNormalization()(maxpool1)
         
-        conv2 = Conv2D(64, 
-                       kernel_size=kernelSizeConv,
-                       padding="same", 
-                       # activation=activationConv,
-                       kernel_initializer=initializationConv,
-                       kernel_regularizer=l1_l2(0.01),
-                       bias_regularizer=l1_l2(0.01),
-                       activity_regularizer=l1_l2(0.01)
-                      )(bn1)#maxpool1)
-        conv2 = Conv2D(64, 
-                       kernel_size=kernelSizeConv,
-                       padding="same", 
-                       # activation=activationConv,
-                       kernel_initializer=initializationConv,
-                       kernel_regularizer=l1_l2(0.01),
-                       bias_regularizer=l1_l2(0.01),
-                       activity_regularizer=l1_l2(0.01)
-                      )(conv2)
-        conv2 = Conv2D(64, 
-                       kernel_size=kernelSizeConv,
-                       padding="same", 
-                       # activation=activationConv,
-                       kernel_initializer=initializationConv,
-                       kernel_regularizer=l1_l2(0.01),
-                       bias_regularizer=l1_l2(0.01),
-                       activity_regularizer=l1_l2(0.01)
-                      )(conv2)
+        # conv2 = Conv2D(64, 
+                       # kernel_size=kernelSizeConv,
+                       # padding="same", 
+                       ##activation=activationConv,
+                       # kernel_initializer=initializationConv,
+                       # kernel_regularizer=l1_l2(0.01),
+                       # bias_regularizer=l1_l2(0.01),
+                       # activity_regularizer=l1_l2(0.01)
+                      # )(bn1)#maxpool1)
+        # conv2 = Conv2D(64, 
+                       # kernel_size=kernelSizeConv,
+                       # padding="same", 
+                       ##activation=activationConv,
+                       # kernel_initializer=initializationConv,
+                       # kernel_regularizer=l1_l2(0.01),
+                       # bias_regularizer=l1_l2(0.01),
+                       # activity_regularizer=l1_l2(0.01)
+                      # )(conv2)
+        # conv2 = Conv2D(64, 
+                       # kernel_size=kernelSizeConv,
+                       # padding="same", 
+                       ##activation=activationConv,
+                       # kernel_initializer=initializationConv,
+                       # kernel_regularizer=l1_l2(0.01),
+                       # bias_regularizer=l1_l2(0.01),
+                       # activity_regularizer=l1_l2(0.01)
+                      # )(conv2)
         conv2 = Conv2D(64, 
                        kernel_size=kernelSizeConv,
                        padding="same", 
@@ -468,29 +521,38 @@ def doSomeDeepLearning(X=None,Y=None,side=85):
                        kernel_regularizer=l1_l2(0.01),
                        bias_regularizer=l1_l2(0.01),
                        activity_regularizer=l1_l2(0.01)
-                      )(conv2)
+                      )(bn1)#(conv2)
         # dropout2 = Dropout(0.25)(conv2)
         maxpool2 = MaxPooling2D(pool_size=(2, 2))(conv2)
         bn2 = BatchNormalization()(maxpool2)
         
-        conv3 = Conv2D(128, 
-                       kernel_size=kernelSizeConv,
-                       padding="same", 
+        # conv3 = Conv2D(128, 
+                       # kernel_size=kernelSizeConv,
+                       # padding="same", 
+                       ##activation=activationConv,
+                       # kernel_initializer=initializationConv,
+                       # kernel_regularizer=l1_l2(0.01),
+                       # bias_regularizer=l1_l2(0.01),
+                       # activity_regularizer=l1_l2(0.01)
+                      # )(bn2)#maxpool2)
+        # conv3 = Conv2D(128, 
+                       # kernel_size=kernelSizeConv,
+                       # padding="same", 
+                      ## activation=activationConv,
+                       # kernel_initializer=initializationConv,
+                       # kernel_regularizer=l1_l2(0.01),
+                       # bias_regularizer=l1_l2(0.01),
+                       # activity_regularizer=l1_l2(0.01)
+                      # )(conv3)
+        # conv3 = Conv2D(128, 
+                       # kernel_size=kernelSizeConv,
+                       # padding="same", 
                        # activation=activationConv,
-                       kernel_initializer=initializationConv,
-                       kernel_regularizer=l1_l2(0.01),
-                       bias_regularizer=l1_l2(0.01),
-                       activity_regularizer=l1_l2(0.01)
-                      )(bn2)#maxpool2)
-        conv3 = Conv2D(128, 
-                       kernel_size=kernelSizeConv,
-                       padding="same", 
-                       # activation=activationConv,
-                       kernel_initializer=initializationConv,
-                       kernel_regularizer=l1_l2(0.01),
-                       bias_regularizer=l1_l2(0.01),
-                       activity_regularizer=l1_l2(0.01)
-                      )(conv3)
+                       # kernel_initializer=initializationConv,
+                       # kernel_regularizer=l1_l2(0.01),
+                       # bias_regularizer=l1_l2(0.01),
+                       # activity_regularizer=l1_l2(0.01)
+                      # )(conv3)
         conv3 = Conv2D(128, 
                        kernel_size=kernelSizeConv,
                        padding="same", 
@@ -499,109 +561,40 @@ def doSomeDeepLearning(X=None,Y=None,side=85):
                        kernel_regularizer=l1_l2(0.01),
                        bias_regularizer=l1_l2(0.01),
                        activity_regularizer=l1_l2(0.01)
-                      )(conv3)
-        conv3 = Conv2D(128, 
-                       kernel_size=kernelSizeConv,
-                       padding="same", 
-                       activation=activationConv,
-                       kernel_initializer=initializationConv,
-                       kernel_regularizer=l1_l2(0.01),
-                       bias_regularizer=l1_l2(0.01),
-                       activity_regularizer=l1_l2(0.01)
-                      )(conv3)              
-        # maxpool12 = MaxPooling2D(pool_size=(2, 2))(conv3)
-        # conv13 = Conv2D(256, 
-                       # kernel_size=kernelSizeConv,
-                       # padding="same", 
-                       ##activation=activationConv,
-                       # kernel_initializer=initializationConv,
-                       # kernel_regularizer=l1_l2(0.01),
-                       # bias_regularizer=l1_l2(0.01),
-                       # activity_regularizer=l1_l2(0.01)
-                      # )(maxpool12)
-        # conv13 = Conv2D(256, 
-                       # kernel_size=kernelSizeConv,
-                       # padding="same", 
-                       ##activation=activationConv,
-                       # kernel_initializer=initializationConv,
-                       # kernel_regularizer=l1_l2(0.01),
-                       # bias_regularizer=l1_l2(0.01),
-                       # activity_regularizer=l1_l2(0.01)
-                      # )(conv13)
-        # conv13 = Conv2D(256, 
-                       # kernel_size=kernelSizeConv,
-                       # padding="same", 
-                       # activation=activationConv,
-                       # kernel_initializer=initializationConv,
-                       # kernel_regularizer=l1_l2(0.01),
-                       # bias_regularizer=l1_l2(0.01),
-                       # activity_regularizer=l1_l2(0.01)
-                      # )(conv13)
-                      
-        # upsample11 = UpSampling2D(size=(2,2))(conv13)
-        # zpad11 = ZeroPadding2D(((1,0),(1,0)))(upsample11)
-        # concat11 = concatenate([zpad11,conv3,])#lambda1])
+                      )(bn2)#(conv3)              
 
-        # conv23 = Conv2D(128, 
-                       # kernel_size=kernelSizeConv,
-                       # padding="same", 
-                       ##activation=activationConv,
-                       # kernel_initializer=initializationConv,
-                       # kernel_regularizer=l1_l2(0.01),
-                       # bias_regularizer=l1_l2(0.01),
-                       # activity_regularizer=l1_l2(0.01)
-                      # )(upsample11)
-        # conv23 = Conv2D(128, 
-                       # kernel_size=kernelSizeConv,
-                       # padding="same", 
-                       ##activation=activationConv,
-                       # kernel_initializer=initializationConv,
-                       # kernel_regularizer=l1_l2(0.01),
-                       # bias_regularizer=l1_l2(0.01),
-                       # activity_regularizer=l1_l2(0.01)
-                      # )(conv23)
-        # conv23 = Conv2D(128, 
-                       # kernel_size=kernelSizeConv,
-                       # padding="same", 
-                       # activation=activationConv,
-                       # kernel_initializer=initializationConv,
-                       # kernel_regularizer=l1_l2(0.01),
-                       # bias_regularizer=l1_l2(0.01),
-                       # activity_regularizer=l1_l2(0.01)
-                      # )(conv23)
-        # dropout3 = Dropout(0.25)(conv3)
         upsample1 = UpSampling2D(size=(2,2))(conv3)
         
         
         concat1 = concatenate([upsample1,conv2,])#lambda1])
         bn3 = BatchNormalization()(concat1)
-        conv4 = Conv2D(64, 
-                       kernel_size=kernelSizeConv,
-                       padding="same", 
-                       # activation=activationConv,
-                       kernel_initializer=initializationConv,
-                       kernel_regularizer=l1_l2(0.01),
-                       bias_regularizer=l1_l2(0.01),
-                       activity_regularizer=l1_l2(0.01)
-                      )(bn3)#concat1)
-        conv4 = Conv2D(64, 
-                       kernel_size=kernelSizeConv,
-                       padding="same", 
-                       # activation=activationConv,
-                       kernel_initializer=initializationConv,
-                       kernel_regularizer=l1_l2(0.01),
-                       bias_regularizer=l1_l2(0.01),
-                       activity_regularizer=l1_l2(0.01)
-                      )(conv4)
-        conv4 = Conv2D(64, 
-                       kernel_size=kernelSizeConv,
-                       padding="same", 
-                       # activation=activationConv,
-                       kernel_initializer=initializationConv,
-                       kernel_regularizer=l1_l2(0.01),
-                       bias_regularizer=l1_l2(0.01),
-                       activity_regularizer=l1_l2(0.01)
-                      )(conv4)
+        # conv4 = Conv2D(64, 
+                       # kernel_size=kernelSizeConv,
+                       # padding="same", 
+                       ##activation=activationConv,
+                       # kernel_initializer=initializationConv,
+                       # kernel_regularizer=l1_l2(0.01),
+                       # bias_regularizer=l1_l2(0.01),
+                       # activity_regularizer=l1_l2(0.01)
+                      # )(bn3)#concat1)
+        # conv4 = Conv2D(64, 
+                       # kernel_size=kernelSizeConv,
+                       # padding="same", 
+                       ##activation=activationConv,
+                       # kernel_initializer=initializationConv,
+                       # kernel_regularizer=l1_l2(0.01),
+                       # bias_regularizer=l1_l2(0.01),
+                       # activity_regularizer=l1_l2(0.01)
+                      # )(conv4)
+        # conv4 = Conv2D(64, 
+                       # kernel_size=kernelSizeConv,
+                       # padding="same", 
+                       ##activation=activationConv,
+                       # kernel_initializer=initializationConv,
+                       # kernel_regularizer=l1_l2(0.01),
+                       # bias_regularizer=l1_l2(0.01),
+                       # activity_regularizer=l1_l2(0.01)
+                      # )(conv4)
         conv4 = Conv2D(64, 
                        kernel_size=kernelSizeConv,
                        padding="same", 
@@ -610,39 +603,39 @@ def doSomeDeepLearning(X=None,Y=None,side=85):
                        kernel_regularizer=l1_l2(0.01),
                        bias_regularizer=l1_l2(0.01),
                        activity_regularizer=l1_l2(0.01)
-                      )(conv4)
+                      )(bn3)#(conv4)
         # dropout4 = Dropout(0.25)(conv4)
         upsample2 = UpSampling2D(size=(2,2))(conv4)
         zpad1 = ZeroPadding2D(((1,0),(1,0)))(upsample2)
         concat2 = concatenate([zpad1,conv1])
         bn4 = BatchNormalization()(concat2)
-        conv5 = Conv2D(32, 
-                       kernel_size=kernelSizeConv,
-                       padding="same", 
-                       # activation=activationConv,
-                       kernel_initializer=initializationConv,
-                       kernel_regularizer=l1_l2(0.01),
-                       bias_regularizer=l1_l2(0.01),
-                       activity_regularizer=l1_l2(0.01)
-                      )(bn4)#concat2)
-        conv5 = Conv2D(32, 
-                       kernel_size=kernelSizeConv,
-                       padding="same", 
-                       # activation=activationConv,
-                       kernel_initializer=initializationConv,
-                       kernel_regularizer=l1_l2(0.01),
-                       bias_regularizer=l1_l2(0.01),
-                       activity_regularizer=l1_l2(0.01)
-                      )(conv5)
-        conv5 = Conv2D(32, 
-                       kernel_size=kernelSizeConv,
-                       padding="same", 
-                       # activation=activationConv,
-                       kernel_initializer=initializationConv,
-                       kernel_regularizer=l1_l2(0.01),
-                       bias_regularizer=l1_l2(0.01),
-                       activity_regularizer=l1_l2(0.01)
-                      )(conv5)
+        # conv5 = Conv2D(32, 
+                       # kernel_size=kernelSizeConv,
+                       # padding="same", 
+                       ##activation=activationConv,
+                       # kernel_initializer=initializationConv,
+                       # kernel_regularizer=l1_l2(0.01),
+                       # bias_regularizer=l1_l2(0.01),
+                       # activity_regularizer=l1_l2(0.01)
+                      # )(bn4)#concat2)
+        # conv5 = Conv2D(32, 
+                       # kernel_size=kernelSizeConv,
+                       # padding="same", 
+                       ##activation=activationConv,
+                       # kernel_initializer=initializationConv,
+                       # kernel_regularizer=l1_l2(0.01),
+                       # bias_regularizer=l1_l2(0.01),
+                       # activity_regularizer=l1_l2(0.01)
+                      # )(conv5)
+        # conv5 = Conv2D(32, 
+                       # kernel_size=kernelSizeConv,
+                       # padding="same", 
+                       ##activation=activationConv,
+                       # kernel_initializer=initializationConv,
+                       # kernel_regularizer=l1_l2(0.01),
+                       # bias_regularizer=l1_l2(0.01),
+                       # activity_regularizer=l1_l2(0.01)
+                      # )(conv5)
         conv5 = Conv2D(1, 
                        kernel_size=kernelSizeConv,
                        padding="same", 
@@ -651,7 +644,7 @@ def doSomeDeepLearning(X=None,Y=None,side=85):
                        kernel_regularizer=l1_l2(0.01),
                        bias_regularizer=l1_l2(0.01),
                        activity_regularizer=l1_l2(0.01)
-                      )(conv5)
+                      )(bn4)#(conv5)
         model = Model(inputs=imput, outputs=conv5)
 
         model.compile(loss=create_weighted_binary_crossentropy(o1,1-o1),
@@ -666,6 +659,11 @@ def doSomeDeepLearning(X=None,Y=None,side=85):
         curr_epoch = max(list(map(lambda x:int(list(filter(lambda x:x.startswith('epoch'),x.split('.')[0].split('_')))[0][5:]),onlyfiles)) )
         model = keras.models.load_model("moj_ulubiony_model_epoch{}.h5".format(curr_epoch),custom_objects=custom_objects)
         print("Saved model:\"moj_ulubiony_model_epoch{}.h5\"".format(curr_epoch))
+    
+    model.compile(loss=create_weighted_mean_squared_error(o1,1-o1),#create_weighted_binary_crossentropy(o1,1-o1),
+        #keras.losses.binary_crossentropy,#keras.losses.mean_squared_error,#
+                  optimizer=keras.optimizers.Adam(),       
+                  metrics=[max_pred,mean_pred,min_pred,'binary_accuracy'])#'accuracy'])#,'precision','recall'])
 
     curr_epoch += 1
     print("Current epoch:{}".format(curr_epoch))
@@ -675,7 +673,7 @@ def doSomeDeepLearning(X=None,Y=None,side=85):
  
     for i in range(curr_epoch,epochs):
         model.fit(x_train, y_train,
-                      batch_size=batch_size,
+                      batch_size=batch_size,#np.min([batch_size,np.max([batch_size//2**(i-3),1])]),
                       epochs=1,
                       verbose=1,
                       # class_weight = {0:1, 1:20},
@@ -711,6 +709,11 @@ def myimshow(x,y,i,size):
     plt.imshow(normalize(y[i],size))
     plt.show()
     
+def load_model(filename):
+    o1 = 0.05
+    custom_objects={'weighted_binary_crossentropy':create_weighted_binary_crossentropy(o1,1 - o1),'max_pred':max_pred,'min_pred':min_pred,'mean_pred':mean_pred,'relu_advanced':relu_advanced,'weighted_mean_squared_error':create_weighted_mean_squared_error(o1,1-o1)}
+    return keras.models.load_model(filename,custom_objects=custom_objects)
+    
 def max_pred(y_true, y_pred):
     return K.max(y_pred)
     
@@ -729,12 +732,19 @@ def create_weighted_binary_crossentropy(zero_weight, one_weight):
 
         # Original binary crossentropy (see losses.py):
         # K.mean(K.binary_crossentropy(y_true, y_pred), axis=-1)
-        k = (y_true+1)//2
-        return K.mean((k * one_weight + (1. - k) * zero_weight)*K.binary_crossentropy(y_true, y_pred))
+        return K.mean((y_true * one_weight + (1. - y_true) * zero_weight)*K.binary_crossentropy(y_true, y_pred))
 
     return weighted_binary_crossentropy
+    
+def create_weighted_mean_squared_error(zero_weight, one_weight):
 
+    def weighted_mean_squared_error(y_true, y_pred):
 
+        # Original (see losses.py):
+        # K.mean(K.square(y_pred - y_true), axis=-1)
+        return K.mean((y_true * one_weight + (1. - y_true) * zero_weight)*K.square(y_pred - y_true))
+
+    return weighted_mean_squared_error
     
 if __name__=="__main__":
     try:
